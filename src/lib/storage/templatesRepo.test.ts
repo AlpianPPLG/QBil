@@ -43,5 +43,33 @@ describe("templatesRepo", () => {
     const second = templatesRepo.list();
     expect(second.length).toBe(first.length);
   });
-});
 
+  it("persists previewData per template", () => {
+    const tpl = templatesRepo.create({ name: "Template With Preview" });
+
+    const updated = templatesRepo.update(tpl.id, {
+      previewData: {
+        merchantName: "Demo",
+        merchantAddress: "",
+        merchantEmail: "demo@example.com",
+        amount: "0.00",
+        currency: "IDR",
+        referenceId: "INV-TEST",
+        note: "",
+        qrColor: "#000000",
+        backgroundColor: "#ffffff",
+        errorCorrectionLevel: "M",
+        logoUrl: "",
+        standard: "generic",
+        taxRate: 10,
+        items: [{ id: "i1", description: "Item", quantity: 1, price: 1000 }],
+        templateId: "modern",
+      },
+    });
+
+    expect(updated.previewData?.merchantName).toBe("Demo");
+
+    const list = templatesRepo.list();
+    expect(list[0].previewData?.referenceId).toBe("INV-TEST");
+  });
+});

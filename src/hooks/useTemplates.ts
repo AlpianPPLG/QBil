@@ -31,7 +31,7 @@ export function useTemplates() {
   }, [refresh]);
 
   const updateTemplate = React.useCallback(
-    (id: string, patch: Partial<Pick<InvoiceTemplate, "name" | "description" | "blocks">>) => {
+    (id: string, patch: Partial<Pick<InvoiceTemplate, "name" | "description" | "blocks" | "previewData">>) => {
       const tpl = templatesRepo.update(id, patch);
       refresh();
       return tpl;
@@ -44,5 +44,9 @@ export function useTemplates() {
     refresh();
   }, [refresh]);
 
-  return { templates, refresh, createTemplate, updateTemplate, removeTemplate };
+  const getTemplateById = React.useCallback((id: string) => {
+    return templatesRepo.getById(id);
+  }, []);
+
+  return { templates, refresh, createTemplate, updateTemplate, removeTemplate, getTemplateById };
 }

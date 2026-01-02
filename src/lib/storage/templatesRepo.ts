@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from "uuid";
-import { invoiceTemplateSchema, type InvoiceTemplate, type TemplateBlock } from "@/lib/schema";
+import { invoiceTemplateSchema, type InvoiceTemplate, type TemplateBlock, type BillingData } from "@/lib/schema";
 
 const STORAGE_KEY = "qbilling_templates_v1";
 
@@ -37,7 +37,8 @@ function writeAll(templates: InvoiceTemplate[]) {
 export interface TemplateCreateInput {
   name: string;
   description?: string;
-  blocks?: TemplateBlock[];
+  blocks?: Array<Partial<TemplateBlock> & Pick<TemplateBlock, "id" | "type" | "x" | "y" | "w" | "h">>;
+  previewData?: BillingData;
 }
 
 export const templatesRepo = {
@@ -45,7 +46,7 @@ export const templatesRepo = {
     return readAll();
   },
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  // Kept as part of public API; some tooling flags this as unused inside this module.
   getById(id: string): InvoiceTemplate | null {
     return readAll().find((t) => t.id === id) ?? null;
   },
@@ -53,6 +54,15 @@ export const templatesRepo = {
   create(input: TemplateCreateInput): InvoiceTemplate {
     const templates = readAll();
     const createdAt = nowIso();
+
+    const blocks = (input.blocks ?? []).map((b, idx) => ({
+      ...b,
+      props: b.props ?? {},
+      order: b.order ?? idx,
+      name: (b.name ?? "").toString(),
+      locked: b.locked ?? false,
+      hidden: b.hidden ?? false,
+    }));
 
     const tpl: InvoiceTemplate = {
       id: uuidv4(),
@@ -65,7 +75,8 @@ export const templatesRepo = {
         height: 1123,
         background: "#ffffff",
       },
-      blocks: input.blocks ?? [],
+      blocks,
+      previewData: input.previewData,
     };
 
     const parsed = invoiceTemplateSchema.parse(tpl);
@@ -74,16 +85,29 @@ export const templatesRepo = {
     return parsed;
   },
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  update(id: string, patch: Partial<Pick<InvoiceTemplate, "name" | "description" | "page" | "blocks">>): InvoiceTemplate {
+  update(
+    id: string,
+    patch: Partial<Pick<InvoiceTemplate, "name" | "description" | "page" | "blocks" | "previewData">>
+  ): InvoiceTemplate {
     const templates = readAll();
     const idx = templates.findIndex((t) => t.id === id);
     if (idx === -1) throw new Error("Template not found");
 
     const current = templates[idx];
+
+    const nextBlocks = (patch.blocks ?? current.blocks).map((b, i) => ({
+      ...b,
+      props: b.props ?? {},
+      order: b.order ?? i,
+      name: (b.name ?? "").toString(),
+      locked: b.locked ?? false,
+      hidden: b.hidden ?? false,
+    }));
+
     const next: InvoiceTemplate = {
       ...current,
       ...patch,
+      blocks: nextBlocks,
       name: (patch.name ?? current.name).trim(),
       description: (patch.description ?? current.description ?? "").trim(),
       updatedAt: nowIso(),
@@ -95,13 +119,11 @@ export const templatesRepo = {
     return parsed;
   },
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   remove(id: string) {
     const templates = readAll().filter((t) => t.id !== id);
     writeAll(templates);
   },
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   seedDefaultsIfEmpty() {
     const templates = readAll();
     if (templates.length > 0) return;

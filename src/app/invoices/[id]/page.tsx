@@ -22,6 +22,14 @@ export default function InvoiceDetailPage() {
 
   const invoice = React.useMemo(() => invoices.find((i) => i.id === params.id) ?? null, [invoices, params.id]);
 
+  const tpl = React.useMemo(() => {
+    if (!invoice) return null;
+    // For now: map preset templateId -> first template that contains that name, else first available.
+    // Next milestone: store actual template UUID in invoice.data.
+    const byName = templates.find((t) => t.name.toLowerCase().includes(invoice.data.templateId));
+    return byName ?? templates[0] ?? null;
+  }, [templates, invoice]);
+
   if (!invoice) {
     return (
       <div className="max-w-[1200px] mx-auto p-10">
@@ -32,14 +40,6 @@ export default function InvoiceDetailPage() {
       </div>
     );
   }
-
-  const tpl = React.useMemo(() => {
-    if (!invoice) return null;
-    // For now: map preset templateId -> first template that contains that name, else first available.
-    // Next milestone: store actual template UUID in invoice.data.
-    const byName = templates.find((t) => t.name.toLowerCase().includes(invoice.data.templateId));
-    return byName ?? templates[0] ?? null;
-  }, [templates, invoice.data.templateId]);
 
   const exportElementId = `invoice-export-${invoice.id}`;
 

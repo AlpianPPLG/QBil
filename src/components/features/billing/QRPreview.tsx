@@ -1,13 +1,12 @@
 "use client";
 
-import React, { useRef, useMemo } from "react";
+import React, { useMemo } from "react";
 import { QRCodeSVG } from "qrcode.react";
 import { BillingData } from "@/lib/schema";
-import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Download, Share2, FileText, Camera, ShieldCheck, Zap, Sparkles } from "lucide-react";
+import { Download, FileText, ShieldCheck, Zap, Sparkles } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
-import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 
 interface QRPreviewProps {
@@ -38,7 +37,6 @@ export const QRPreview: React.FC<QRPreviewProps> = ({ data, onDownload }) => {
         }
     }, [data]);
 
-    const totalItems = data.items.reduce((acc, item) => acc + (item.quantity), 0);
     const subtotal = data.items.reduce((acc, item) => acc + (item.price * item.quantity), 0);
     const taxValue = subtotal * (data.taxRate / 100);
 

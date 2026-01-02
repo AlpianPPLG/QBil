@@ -6,6 +6,7 @@ import React from "react";
 import { Rnd } from "react-rnd";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useTemplates } from "@/hooks/useTemplates";
+import { useInvoices } from "@/hooks/useInvoices";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -14,6 +15,18 @@ import { Separator } from "@/components/ui/separator";
 import { Plus, LayoutGrid, Save } from "lucide-react";
 import type { BillingData, TemplateBlock, TemplateBlockType } from "@/lib/schema";
 import { InvoiceTemplateRenderer } from "@/components/features/templates/InvoiceTemplateRenderer";
+import { Palette } from "@/components/features/templates/builder/Palette";
+import { LayersPanel } from "@/components/features/templates/builder/LayersPanel";
+import { AlignmentGuidesOverlay } from "@/components/features/templates/builder/AlignmentGuidesOverlay";
+import { alignToPageCenter, type Guide } from "@/lib/templates/alignment";
+import {
+  clearSelection,
+  ensureSingleSelection,
+  nextSelectionFromClick,
+  reorderBlocksById,
+  selectedIds as selectedIdsFromMap,
+  type SelectedMap,
+} from "@/lib/templates/selection";
 
 // v2: pixel-based A4 canvas (matches schema default ~A4 @ 96dpi)
 const PAGE_W = 794;
@@ -61,33 +74,85 @@ function TemplateBuilderInner() {
   const [mounted, setMounted] = React.useState(false);
   React.useEffect(() => setMounted(true), []);
 
+  const [guides, setGuides] = React.useState<Guide[]>([]);
+  const clearGuides = React.useCallback(() => setGuides([]), []);
+
   const { templates, createTemplate, updateTemplate } = useTemplates();
+  const { invoices } = useInvoices();
   const template = templates.find((t) => t.id === templateId) ?? templates[0];
 
   const [name, setName] = React.useState("");
-  const [selectedId, setSelectedId] = React.useState<string | null>(null);
+
+  // Multi-selection model:
+  // - selected: map of selected ids
+  // - activeId: the primary/last-selected id (used for inspector)
+  // - anchorId: shift-range anchor
+  const [selected, setSelected] = React.useState<SelectedMap>({});
+  const [activeId, setActiveId] = React.useState<string | null>(null);
+  const [anchorId, setAnchorId] = React.useState<string | null>(null);
+
   const [mode, setMode] = React.useState<"design" | "preview">("design");
 
-  const [previewData, setPreviewData] = React.useState<BillingData>(() => ({
-    merchantName: "QBilling Demo Store",
-    merchantAddress: "Jl. Contoh No. 123\nJakarta, Indonesia",
-    merchantEmail: "billing@qbilling.local",
-    amount: "150000.00",
-    currency: "IDR",
-    referenceId: "INV-DEMO-2026-0001",
-    note: "Terima kasih sudah berbelanja.\nPembayaran maksimal 7 hari.",
-    qrColor: "#111827",
-    backgroundColor: "#ffffff",
-    errorCorrectionLevel: "M",
-    logoUrl: "",
-    standard: "generic",
-    taxRate: 11,
-    items: [
-      { id: "i1", description: "Service A", quantity: 1, price: 100000 },
-      { id: "i2", description: "Service B", quantity: 1, price: 50000 },
-    ],
-    templateId: "modern",
-  }));
+  const defaultPreviewData = React.useMemo<BillingData>(
+    () => ({
+      merchantName: "QBilling Demo Store",
+      merchantAddress: "Jl. Contoh No. 123\nJakarta, Indonesia",
+      merchantEmail: "billing@qbilling.local",
+      amount: "150000.00",
+      currency: "IDR",
+      referenceId: "INV-DEMO-2026-0001",
+      note: "Terima kasih sudah berbelanja.\nPembayaran maksimal 7 hari.",
+      qrColor: "#111827",
+      backgroundColor: "#ffffff",
+      errorCorrectionLevel: "M",
+      logoUrl: "",
+      standard: "generic",
+      taxRate: 11,
+      items: [
+        { id: "i1", description: "Service A", quantity: 1, price: 100000 },
+        { id: "i2", description: "Service B", quantity: 1, price: 50000 },
+      ],
+      templateId: "modern",
+    }),
+    []
+  );
+
+  // Invoice selected as preview source (optional)
+  const [previewInvoiceId, setPreviewInvoiceId] = React.useState<string>("");
+
+  const invoicePreviewData = React.useMemo(() => {
+    if (!previewInvoiceId) return null;
+    const inv = invoices.find((i) => i.id === previewInvoiceId);
+    return inv?.data ?? null;
+  }, [invoices, previewInvoiceId]);
+
+  const [previewData, setPreviewData] = React.useState<BillingData>(() => defaultPreviewData);
+
+  // When template changes, hydrate previewData from template.previewData (if any).
+  // Also reset invoice override.
+  React.useEffect(() => {
+    setName(template?.name ?? "");
+    setSelected(clearSelection());
+    setActiveId(null);
+    setAnchorId(null);
+    setPreviewInvoiceId("");
+
+    if (!template) {
+      setPreviewData(defaultPreviewData);
+      return;
+    }
+
+    setPreviewData(template.previewData ?? defaultPreviewData);
+  }, [template, defaultPreviewData]);
+
+  // If an invoice is selected for preview, override previewData using that invoice.
+  React.useEffect(() => {
+    if (invoicePreviewData) {
+      setPreviewData(invoicePreviewData);
+    } else if (template) {
+      setPreviewData(template.previewData ?? defaultPreviewData);
+    }
+  }, [invoicePreviewData, template, defaultPreviewData]);
 
   const previewSubtotal = React.useMemo(() => {
     return (previewData.items ?? []).reduce((acc, it) => acc + it.price * it.quantity, 0);
@@ -98,41 +163,217 @@ function TemplateBuilderInner() {
     setPreviewData((d) => ({ ...d, amount: String(previewSubtotal.toFixed(2)) }));
   }, [previewSubtotal]);
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const persistTemplatePreviewData = React.useCallback(
+    (next: BillingData | ((prev: BillingData) => BillingData)) => {
+      if (!template) return;
+
+      // If preview is coming from an invoice selection, we don't persist edits to template data
+      // to avoid surprising overwrites.
+      if (previewInvoiceId) {
+        setPreviewData(next as never);
+        return;
+      }
+
+      setPreviewData((prev) => {
+        const resolved = typeof next === "function" ? (next as (p: BillingData) => BillingData)(prev) : next;
+        updateTemplate(template.id, { previewData: resolved });
+        return resolved;
+      });
+    },
+    [template, updateTemplate, previewInvoiceId]
+  );
+
   const updatePreviewItem = (id: string, patch: Partial<{ description: string; quantity: number; price: number }>) => {
-    setPreviewData((d) => ({
+    persistTemplatePreviewData((d) => ({
       ...d,
       items: (d.items ?? []).map((it) => (it.id === id ? { ...it, ...patch } : it)),
     }));
   };
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const addPreviewItem = () => {
-    setPreviewData((d) => {
+    persistTemplatePreviewData((d) => {
       const idx = (d.items?.length ?? 0) + 1;
       const next = [...(d.items ?? []), { id: `i${Date.now()}`, description: `Item ${idx}`, quantity: 1, price: 0 }];
       return { ...d, items: next };
     });
   };
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const removePreviewItem = (id: string) => {
-    setPreviewData((d) => ({ ...d, items: (d.items ?? []).filter((it) => it.id !== id) }));
+    persistTemplatePreviewData((d) => ({ ...d, items: (d.items ?? []).filter((it) => it.id !== id) }));
   };
 
-  React.useEffect(() => {
-    setName(template?.name ?? "");
-    setSelectedId(null);
-  }, [template?.id, template?.name]);
+  const blocks = React.useMemo(() => {
+    return (template?.blocks ?? []).slice().sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+  }, [template?.blocks]);
 
-  const blocks = template?.blocks ?? [];
-  const selected = blocks.find((b) => b.id === selectedId) ?? null;
+  const orderedLayerIds = React.useMemo(() => {
+    // LayersPanel renders reverse() so topmost is first; for shift-range we use that same order.
+    return blocks
+      .slice()
+      .sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
+      .reverse()
+      .map((b) => b.id);
+  }, [blocks]);
+
+  const selectedIds = React.useMemo(() => selectedIdsFromMap(selected), [selected]);
+
+  const activeBlock = blocks.find((b) => b.id === activeId) ?? null;
+
+  const canvasDragSnapshot = React.useRef<Record<string, { x: number; y: number }>>({});
+
+  const shouldIgnoreGlobalShortcut = React.useCallback(() => {
+    const el = globalThis.document?.activeElement as HTMLElement | null;
+    if (!el) return false;
+    const tag = el.tagName?.toLowerCase();
+    if (tag === "input" || tag === "textarea" || tag === "select") return true;
+    if (el.isContentEditable) return true;
+    return false;
+  }, []);
 
   const getPropString = React.useCallback((props: unknown, key: string) => {
     if (!props || typeof props !== "object") return "";
     const v = (props as Record<string, unknown>)[key];
     return typeof v === "string" ? v : "";
   }, []);
+
+  const setSingleSelection = React.useCallback(
+    (id: string | null) => {
+      if (!id) {
+        setSelected(clearSelection());
+        setActiveId(null);
+        setAnchorId(null);
+        return;
+      }
+
+      setSelected(ensureSingleSelection(id));
+      setActiveId(id);
+      setAnchorId(id);
+    },
+    []
+  );
+
+  const handlePanelSelectMeta = React.useCallback(
+    (input: { id: string; metaKey: boolean; shiftKey: boolean }) => {
+      const mode = input.shiftKey ? "range" : input.metaKey ? "toggle" : "single";
+      const res = nextSelectionFromClick({
+        orderedIds: orderedLayerIds,
+        current: selected,
+        anchorId,
+        targetId: input.id,
+        mode,
+      });
+      setSelected(res.selected);
+      setActiveId(input.id);
+      setAnchorId(res.anchorId);
+    },
+    [anchorId, orderedLayerIds, selected]
+  );
+
+  const renameBlock = React.useCallback(
+    (id: string, nextName: string) => {
+      const trimmed = nextName.trim();
+      updateBlock(id, { name: trimmed });
+    },
+    // updateBlock is stable enough for our usage - it changes only if template changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [template?.id, blocks]
+  );
+
+  const duplicateBlocks = React.useCallback(
+    (ids: string[]) => {
+      if (!template) return;
+      if (ids.length === 0) return;
+
+      const idSet = new Set(ids);
+      const toCopy = blocks.filter((b) => idSet.has(b.id));
+      if (toCopy.length === 0) return;
+
+      const maxOrder = blocks.reduce((m, b) => Math.max(m, b.order ?? 0), 0);
+
+      // Keep relative stacking by duplicating in ascending order and giving new orders after current max.
+      const sortedCopy = toCopy.slice().sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+
+      let orderCounter = maxOrder;
+      const clones: TemplateBlock[] = sortedCopy.map((b) => {
+        orderCounter += 1;
+        const id = globalThis.crypto?.randomUUID?.() ?? makeClientId();
+        return {
+          ...b,
+          id,
+          name: b.name ? `${b.name} (copy)` : "(copy)",
+          x: clamp(snap(b.x + GRID), 0, PAGE_W - b.w),
+          y: clamp(snap(b.y + GRID), 0, PAGE_H - b.h),
+          order: orderCounter,
+          locked: false,
+          hidden: false,
+        };
+      });
+
+      const next = [...blocks, ...clones];
+      updateTemplate(template.id, { blocks: next });
+
+      // Select duplicated set (makes it easy to move them right away)
+      const nextSelected: SelectedMap = {};
+      clones.forEach((c) => {
+        nextSelected[c.id] = true;
+      });
+      setSelected(nextSelected);
+      setActiveId(clones[clones.length - 1]?.id ?? null);
+      setAnchorId(clones[0]?.id ?? null);
+    },
+    [blocks, template, updateTemplate]
+  );
+
+  const deleteSelected = React.useCallback(() => {
+    if (!template) return;
+    if (selectedIds.length === 0) return;
+
+    const idSet = new Set(selectedIds);
+    const next = blocks.filter((b) => !idSet.has(b.id));
+    updateTemplate(template.id, { blocks: next });
+    setSingleSelection(null);
+  }, [blocks, selectedIds, setSingleSelection, template, updateTemplate]);
+
+  const getMetaKeyFromMouseEvent = React.useCallback((ev: MouseEvent) => {
+    // MouseEvent has metaKey in browsers, but keep it defensive for non-standard event shapes.
+    const maybe = ev as unknown;
+    const metaKey = typeof maybe === "object" && maybe !== null && "metaKey" in maybe ? Boolean((maybe as { metaKey?: unknown }).metaKey) : false;
+    return metaKey || ev.ctrlKey;
+  }, []);
+
+  React.useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (shouldIgnoreGlobalShortcut()) return;
+
+      const meta = e.metaKey || e.ctrlKey;
+
+      if ((e.key === "Delete" || e.key === "Backspace") && selectedIds.length > 0) {
+        e.preventDefault();
+        deleteSelected();
+        return;
+      }
+
+      if (meta && (e.key === "d" || e.key === "D") && selectedIds.length > 0) {
+        e.preventDefault();
+        duplicateBlocks(selectedIds);
+        return;
+      }
+
+      if (meta && (e.key === "a" || e.key === "A") && blocks.length > 0) {
+        e.preventDefault();
+        const next: SelectedMap = {};
+        blocks.forEach((b) => {
+          next[b.id] = true;
+        });
+        setSelected(next);
+        setActiveId(blocks[blocks.length - 1]?.id ?? null);
+        setAnchorId(blocks[blocks.length - 1]?.id ?? null);
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [blocks, deleteSelected, duplicateBlocks, selectedIds, shouldIgnoreGlobalShortcut]);
 
   if (!mounted) {
     return (
@@ -152,7 +393,7 @@ function TemplateBuilderInner() {
     updateTemplate(template.id, { name });
   };
 
-  const addBlock = (type: TemplateBlockType) => {
+  const addBlock = (type: TemplateBlockType, at?: { x: number; y: number }) => {
     if (!template) return;
     const id = globalThis.crypto?.randomUUID?.() ?? makeClientId();
 
@@ -169,35 +410,68 @@ function TemplateBuilderInner() {
     };
 
     const d = defaults[type];
+    const maxOrder = blocks.reduce((m, b) => Math.max(m, b.order ?? 0), 0);
+
     const next: TemplateBlock[] = [
       ...blocks,
       {
         id,
         type,
-        x: 16,
-        y: 16,
+        x: clamp(snap(at?.x ?? 16), 0, PAGE_W - d.w),
+        y: clamp(snap(at?.y ?? 16), 0, PAGE_H - d.h),
         w: d.w,
         h: d.h,
         props: d.props ?? {},
+        name: "",
+        order: maxOrder + 1,
+        locked: false,
+        hidden: false,
       },
     ];
 
     updateTemplate(template.id, { blocks: next });
-    setSelectedId(id);
+    setActiveId(id);
   };
 
-  const updateBlock = (id: string, patch: Partial<Pick<TemplateBlock, "x" | "y" | "w" | "h" | "props">>) => {
+  const updateBlock = (id: string, patch: Partial<Pick<TemplateBlock, "x" | "y" | "w" | "h" | "props" | "name" | "order" | "locked" | "hidden">>) => {
     if (!template) return;
     const next = blocks.map((b) => (b.id === id ? { ...b, ...patch, props: patch.props ?? b.props } : b));
     updateTemplate(template.id, { blocks: next });
   };
 
-  const deleteSelected = () => {
-    if (!template || !selected) return;
-    const next = blocks.filter((b) => b.id !== selected.id);
+  const moveLayer = (id: string, dir: "up" | "down") => {
+    if (!template) return;
+    const sorted = blocks.slice().sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+    const idx = sorted.findIndex((b) => b.id === id);
+    if (idx === -1) return;
+
+    const swapWith = dir === "up" ? idx + 1 : idx - 1;
+    if (swapWith < 0 || swapWith >= sorted.length) return;
+
+    const a = sorted[idx];
+    const b = sorted[swapWith];
+    const next = sorted.map((blk) => {
+      if (blk.id === a.id) return { ...blk, order: b.order ?? 0 };
+      if (blk.id === b.id) return { ...blk, order: a.order ?? 0 };
+      return blk;
+    });
+
     updateTemplate(template.id, { blocks: next });
-    setSelectedId(null);
   };
+
+  const toggleLock = (id: string) => {
+    const blk = blocks.find((b) => b.id === id);
+    if (!blk) return;
+    updateBlock(id, { locked: !blk.locked });
+  };
+
+  const toggleHidden = (id: string) => {
+    const blk = blocks.find((b) => b.id === id);
+    if (!blk) return;
+    updateBlock(id, { hidden: !blk.hidden });
+  };
+
+  // (moved selection/duplicate callbacks above early returns)
 
   return (
     <div className="max-w-7xl mx-auto p-6 lg:p-12 space-y-10">
@@ -263,8 +537,33 @@ function TemplateBuilderInner() {
 
               <Separator />
 
+              <Palette />
+
+              <Separator />
+
+              <LayersPanel
+                blocks={blocks}
+                selectedId={activeId}
+                selectedIds={selected}
+                onSelectAction={(id) => setSingleSelection(id)}
+                onSelectWithMetaAction={handlePanelSelectMeta}
+                onMoveAction={moveLayer}
+                onToggleLockAction={toggleLock}
+                onToggleHiddenAction={toggleHidden}
+                onRenameAction={renameBlock}
+                onDuplicateAction={(id) => duplicateBlocks([id])}
+                onDuplicateSelectedAction={() => duplicateBlocks(selectedIds)}
+                onReorderAction={({ fromId, toId }) => {
+                  if (!template) return;
+                  const next = reorderBlocksById({ blocks, fromId, toId });
+                  updateTemplate(template.id, { blocks: next });
+                }}
+              />
+
+              <Separator />
+
               <div className="space-y-2">
-                <div className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Add block</div>
+                <div className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Add block (click)</div>
                 <div className="grid grid-cols-2 gap-2">
                   {([
                     "header",
@@ -287,66 +586,77 @@ function TemplateBuilderInner() {
 
               <div className="space-y-3">
                 <div className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Selected</div>
-                {selected ? (
+                {activeBlock ? (
                   <div className="space-y-3">
                     <div className="flex items-center gap-2">
-                      <Badge>{selected.type}</Badge>
-                      <span className="font-mono text-xs text-muted-foreground truncate">{selected.id}</span>
+                      <Badge>{activeBlock.type}</Badge>
+                      <span className="font-mono text-xs text-muted-foreground truncate">{activeBlock.id}</span>
+                      {selectedIds.length > 1 ? (
+                        <span className="text-[10px] text-muted-foreground">({selectedIds.length} selected)</span>
+                      ) : null}
                     </div>
 
                     <div className="grid grid-cols-2 gap-2">
                       <div className="space-y-1">
                         <div className="text-[10px] text-muted-foreground">x</div>
                         <Input
-                          value={String(selected.x)}
-                          onChange={(e) => updateBlock(selected.id, { x: snap(Number(e.target.value) || 0) })}
+                          value={String(activeBlock.x)}
+                          onChange={(e) => updateBlock(activeBlock.id, { x: snap(Number(e.target.value) || 0) })}
                         />
                       </div>
                       <div className="space-y-1">
                         <div className="text-[10px] text-muted-foreground">y</div>
                         <Input
-                          value={String(selected.y)}
-                          onChange={(e) => updateBlock(selected.id, { y: snap(Number(e.target.value) || 0) })}
+                          value={String(activeBlock.y)}
+                          onChange={(e) => updateBlock(activeBlock.id, { y: snap(Number(e.target.value) || 0) })}
                         />
                       </div>
                       <div className="space-y-1">
                         <div className="text-[10px] text-muted-foreground">w</div>
                         <Input
-                          value={String(selected.w)}
-                          onChange={(e) => updateBlock(selected.id, { w: snap(Number(e.target.value) || GRID) })}
+                          value={String(activeBlock.w)}
+                          onChange={(e) => updateBlock(activeBlock.id, { w: snap(Number(e.target.value) || GRID) })}
                         />
                       </div>
                       <div className="space-y-1">
                         <div className="text-[10px] text-muted-foreground">h</div>
                         <Input
-                          value={String(selected.h)}
-                          onChange={(e) => updateBlock(selected.id, { h: snap(Number(e.target.value) || GRID) })}
+                          value={String(activeBlock.h)}
+                          onChange={(e) => updateBlock(activeBlock.id, { h: snap(Number(e.target.value) || GRID) })}
                         />
                       </div>
                     </div>
 
-                    {selected.type === "header" && (
+                    {activeBlock.type === "header" && (
                       <div className="space-y-1">
                         <div className="text-[10px] text-muted-foreground">title</div>
                         <Input
-                          value={getPropString(selected.props, "title")}
-                          onChange={(e) => updateBlock(selected.id, { props: { ...(selected.props ?? {}), title: e.target.value } })}
+                          value={getPropString(activeBlock.props, "title")}
+                          onChange={(e) =>
+                            updateBlock(activeBlock.id, {
+                              props: { ...(activeBlock.props ?? {}), title: e.target.value },
+                            })
+                          }
                         />
                       </div>
                     )}
 
-                    {(selected.type === "text" || selected.type === "footer") && (
+                    {(activeBlock.type === "text" || activeBlock.type === "footer") && (
                       <div className="space-y-1">
                         <div className="text-[10px] text-muted-foreground">text</div>
                         <Input
-                          value={getPropString(selected.props, "text")}
-                          onChange={(e) => updateBlock(selected.id, { props: { ...(selected.props ?? {}), text: e.target.value } })}
+                          value={getPropString(activeBlock.props, "text")}
+                          onChange={(e) =>
+                            updateBlock(activeBlock.id, {
+                              props: { ...(activeBlock.props ?? {}), text: e.target.value },
+                            })
+                          }
                         />
                       </div>
                     )}
 
                     <Button variant="destructive" onClick={deleteSelected} className="rounded-xl">
-                      Delete block
+                      Delete {selectedIds.length > 1 ? `(${selectedIds.length}) blocks` : "block"}
                     </Button>
                   </div>
                 ) : (
@@ -360,11 +670,41 @@ function TemplateBuilderInner() {
                   <div className="space-y-3">
                     <div className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Preview data</div>
 
+                    <div className="space-y-2">
+                      <div className="text-[10px] text-muted-foreground">Preview from invoice (optional)</div>
+                      <select
+                        className="h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                        value={previewInvoiceId}
+                        onChange={(e) => setPreviewInvoiceId(e.target.value)}
+                      >
+                        <option value="">(Use template sample data)</option>
+                        {invoices.map((inv) => (
+                          <option key={inv.id} value={inv.id}>
+                            {inv.referenceId}   {inv.status}
+                          </option>
+                        ))}
+                      </select>
+                      {previewInvoiceId ? (
+                        <div className="text-[10px] text-muted-foreground">
+                          Using invoice data for preview. Clear selection to edit & save sample data per-template.
+                        </div>
+                      ) : (
+                        <div className="text-[10px] text-muted-foreground">
+                          Editing below will be saved to this template as its sample preview data.
+                        </div>
+                      )}
+                    </div>
+
                     <div className="space-y-1">
                       <div className="text-[10px] text-muted-foreground">merchantName</div>
                       <Input
                         value={previewData.merchantName}
-                        onChange={(e) => setPreviewData((d) => ({ ...d, merchantName: e.target.value }))}
+                        onChange={(e) =>
+                          persistTemplatePreviewData((d) => ({
+                            ...d,
+                            merchantName: e.target.value,
+                          }))
+                        }
                       />
                     </div>
 
@@ -374,7 +714,10 @@ function TemplateBuilderInner() {
                         value={String(previewData.taxRate)}
                         onChange={(e) => {
                           const n = Number(e.target.value);
-                          setPreviewData((d) => ({ ...d, taxRate: Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : 0 }));
+                          persistTemplatePreviewData((d) => ({
+                            ...d,
+                            taxRate: Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : 0,
+                          }));
                         }}
                       />
                     </div>
@@ -467,7 +810,30 @@ function TemplateBuilderInner() {
                 <div
                   className="relative rounded-2xl border border-border/40 bg-white overflow-hidden"
                   style={{ width: PAGE_W, height: PAGE_H }}
-                  onMouseDown={() => setSelectedId(null)}
+                  onMouseDown={() => setSingleSelection(null)}
+                  onDragOver={(e) => {
+                    if (e.dataTransfer.types.includes("application/qbilling-block")) {
+                      e.preventDefault();
+                      e.dataTransfer.dropEffect = "copy";
+                    }
+                  }}
+                  onDrop={(e) => {
+                    const raw = e.dataTransfer.getData("application/qbilling-block");
+                    if (!raw) return;
+                    e.preventDefault();
+
+                    try {
+                      const parsed = JSON.parse(raw) as { type?: TemplateBlockType };
+                      if (!parsed.type) return;
+
+                      const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect();
+                      const x = e.clientX - rect.left;
+                      const y = e.clientY - rect.top;
+                      addBlock(parsed.type, { x, y });
+                    } catch {
+                      // ignore
+                    }
+                  }}
                 >
                   {/* grid lines */}
                   <div
@@ -478,54 +844,156 @@ function TemplateBuilderInner() {
                     }}
                   />
 
-                  {blocks.map((b) => {
-                    const active = b.id === selectedId;
-                    return (
-                      <Rnd
-                        key={b.id}
-                        size={{ width: b.w, height: b.h }}
-                        position={{ x: b.x, y: b.y }}
-                        bounds="parent"
-                        enableResizing
-                        dragGrid={[GRID, GRID]}
-                        resizeGrid={[GRID, GRID]}
-                        onDragStart={() => setSelectedId(b.id)}
-                        onResizeStart={() => setSelectedId(b.id)}
-                        onDragStop={(_, d) => {
-                          const nx = snap(d.x);
-                          const ny = snap(d.y);
-                          updateBlock(b.id, { x: clamp(nx, 0, PAGE_W - b.w), y: clamp(ny, 0, PAGE_H - b.h) });
-                        }}
-                        onResizeStop={(_, __, ref, ___, pos) => {
-                          const nw = snap(ref.offsetWidth);
-                          const nh = snap(ref.offsetHeight);
-                          const nx = snap(pos.x);
-                          const ny = snap(pos.y);
-                          updateBlock(b.id, {
-                            x: clamp(nx, 0, PAGE_W - nw),
-                            y: clamp(ny, 0, PAGE_H - nh),
-                            w: clamp(nw, GRID, PAGE_W),
-                            h: clamp(nh, GRID, PAGE_H),
-                          });
-                        }}
-                      >
-                        <button
-                          type="button"
-                          onMouseDown={(e) => {
-                            e.stopPropagation();
-                            setSelectedId(b.id);
+                  <AlignmentGuidesOverlay guides={guides} />
+
+                  {blocks
+                    .filter((b) => !b.hidden)
+                    .map((b) => {
+                      const active = !!selected[b.id];
+                      const locked = b.locked;
+                      return (
+                        <Rnd
+                          key={b.id}
+                          size={{ width: b.w, height: b.h }}
+                          position={{ x: b.x, y: b.y }}
+                          bounds="parent"
+                          enableResizing={!locked}
+                          disableDragging={locked}
+                          dragGrid={[GRID, GRID]}
+                          resizeGrid={[GRID, GRID]}
+                          onDragStart={(e) => {
+                            // If this block is part of multi-selection, capture snapshot and drag as a group.
+                            // Otherwise we behave like single selection.
+                            const ev = e as unknown as MouseEvent;
+                            const metaKey = getMetaKeyFromMouseEvent(ev);
+
+                            if (selected[b.id] && selectedIds.length > 1) {
+                              canvasDragSnapshot.current = {};
+                              selectedIds.forEach((id) => {
+                                const blk = blocks.find((x) => x.id === id);
+                                if (!blk) return;
+                                if (blk.locked) return; // locked blocks stay put
+                                canvasDragSnapshot.current[id] = { x: blk.x, y: blk.y };
+                              });
+                              clearGuides();
+                              return;
+                            }
+
+                            handlePanelSelectMeta({ id: b.id, metaKey, shiftKey: !!ev.shiftKey });
+                            canvasDragSnapshot.current = { [b.id]: { x: b.x, y: b.y } };
+                            clearGuides();
                           }}
-                          className={
-                            "h-full w-full rounded-xl border text-left p-2 text-xs font-bold shadow-sm transition-colors bg-background/80 " +
-                            (active ? "border-primary ring-2 ring-primary/30" : "border-border/40")
-                          }
+                          onDrag={(_, d) => {
+                            // Show guides based on the dragged block itself (primary)
+                            const res = alignToPageCenter({ rect: { x: d.x, y: d.y, w: b.w, h: b.h }, page: { width: PAGE_W, height: PAGE_H } });
+                            if (res.guides.length) setGuides(res.guides);
+                            else clearGuides();
+
+                            // If multi-drag, apply live preview positions to other selected blocks by committing temp updates.
+                            if (selected[b.id] && selectedIds.length > 1) {
+                              const base = canvasDragSnapshot.current[b.id];
+                              if (!base) return;
+                              const dx = d.x - base.x;
+                              const dy = d.y - base.y;
+
+                              const nextBlocks = blocks.map((blk) => {
+                                if (!selected[blk.id]) return blk;
+                                if (blk.locked) return blk;
+                                const snap0 = canvasDragSnapshot.current[blk.id];
+                                if (!snap0) return blk;
+                                const nx = clamp(snap(snap0.x + dx), 0, PAGE_W - blk.w);
+                                const ny = clamp(snap(snap0.y + dy), 0, PAGE_H - blk.h);
+                                return { ...blk, x: nx, y: ny };
+                              });
+
+                              // Commit as we drag for a smooth group move.
+                              if (template) updateTemplate(template.id, { blocks: nextBlocks });
+                            }
+                          }}
+                          onDragStop={(_, d) => {
+                            const snappedX = snap(d.x);
+                            const snappedY = snap(d.y);
+
+                            const res = alignToPageCenter({ rect: { x: snappedX, y: snappedY, w: b.w, h: b.h }, page: { width: PAGE_W, height: PAGE_H } });
+                            const nxPrimary = snap(res.x ?? snappedX);
+                            const nyPrimary = snap(res.y ?? snappedY);
+
+                            if (selected[b.id] && selectedIds.length > 1) {
+                              const base = canvasDragSnapshot.current[b.id];
+                              if (!base || !template) {
+                                clearGuides();
+                                return;
+                              }
+                              const dx = nxPrimary - base.x;
+                              const dy = nyPrimary - base.y;
+
+                              const nextBlocks = blocks.map((blk) => {
+                                if (!selected[blk.id]) return blk;
+                                if (blk.locked) return blk;
+                                const snap0 = canvasDragSnapshot.current[blk.id];
+                                if (!snap0) return blk;
+                                const nx = clamp(snap(snap0.x + dx), 0, PAGE_W - blk.w);
+                                const ny = clamp(snap(snap0.y + dy), 0, PAGE_H - blk.h);
+                                return { ...blk, x: nx, y: ny };
+                              });
+
+                              updateTemplate(template.id, { blocks: nextBlocks });
+                              clearGuides();
+                              return;
+                            }
+
+                            updateBlock(b.id, { x: clamp(nxPrimary, 0, PAGE_W - b.w), y: clamp(nyPrimary, 0, PAGE_H - b.h) });
+                            clearGuides();
+                          }}
+                          onResizeStart={(e) => {
+                            const ev = e as unknown as MouseEvent;
+                            handlePanelSelectMeta({ id: b.id, metaKey: getMetaKeyFromMouseEvent(ev), shiftKey: !!ev.shiftKey });
+                            clearGuides();
+                          }}
+                          onResize={(_, __, ref, ___, pos) => {
+                            const w = ref.offsetWidth;
+                            const h = ref.offsetHeight;
+                            const res = alignToPageCenter({ rect: { x: pos.x, y: pos.y, w, h }, page: { width: PAGE_W, height: PAGE_H } });
+                            if (res.guides.length) setGuides(res.guides);
+                            else clearGuides();
+                          }}
+                          onResizeStop={(_, __, ref, ___, pos) => {
+                            const nw0 = snap(ref.offsetWidth);
+                            const nh0 = snap(ref.offsetHeight);
+                            const nx0 = snap(pos.x);
+                            const ny0 = snap(pos.y);
+
+                            const res = alignToPageCenter({ rect: { x: nx0, y: ny0, w: nw0, h: nh0 }, page: { width: PAGE_W, height: PAGE_H } });
+                            const nx = snap(res.x ?? nx0);
+                            const ny = snap(res.y ?? ny0);
+
+                            updateBlock(b.id, {
+                              x: clamp(nx, 0, PAGE_W - nw0),
+                              y: clamp(ny, 0, PAGE_H - nh0),
+                              w: clamp(nw0, GRID, PAGE_W),
+                              h: clamp(nh0, GRID, PAGE_H),
+                            });
+                            clearGuides();
+                          }}
                         >
-                          {b.type}
-                          <div className="text-[10px] font-mono opacity-60 truncate">{b.id}</div>
-                        </button>
-                      </Rnd>
-                    );
-                  })}
+                          <button
+                            type="button"
+                            onMouseDown={(e) => {
+                              e.stopPropagation();
+                              handlePanelSelectMeta({ id: b.id, metaKey: e.metaKey || e.ctrlKey, shiftKey: e.shiftKey });
+                            }}
+                            className={
+                              "h-full w-full rounded-xl border text-left p-2 text-xs font-bold shadow-sm transition-colors bg-background/80 " +
+                              (active ? "border-primary ring-2 ring-primary/30" : "border-border/40") +
+                              (locked ? " opacity-70" : "")
+                            }
+                          >
+                            {b.type}{locked ? " (locked)" : ""}
+                            <div className="text-[10px] font-mono opacity-60 truncate">{b.id}</div>
+                          </button>
+                        </Rnd>
+                      );
+                    })}
                 </div>
               )}
 

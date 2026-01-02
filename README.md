@@ -131,7 +131,9 @@ Di halaman **Invoices**:
 Buka **Templates → Builder**:
 - **Design**: tambah block dan atur layout (drag & resize)
 - **Preview**: lihat hasil render invoice menggunakan blocks yang sama
-- Isi form **Preview data** untuk mengubah merchantName, taxRate, dan items agar preview sesuai kebutuhan
+- Preview bisa pakai 2 sumber data:
+  - **Template sample data (per-template)** → default, bisa kamu edit di panel kiri. Perubahannya otomatis tersimpan ke template itu.
+  - **Invoice existing** → pilih dari dropdown **“Preview from invoice”** untuk pakai data invoice nyata (preview otomatis). Kosongkan dropdown untuk kembali ke sample data template.
 
 ## API Endpoints
 
@@ -159,6 +161,7 @@ Halaman builder menggunakan `useSearchParams()` dan **dibungkus Suspense** + `dy
 
 ## Roadmap (Opsional)
 - Template builder props yang lebih lengkap (font/align/padding/colors)
-- Preview: pilih invoice existing sebagai sumber preview
+- Preview: pilih invoice existing sebagai sumber preview (DONE)
+- Preview: simpan sample data per template (DONE)
 - Template export yang benar-benar 1:1 di merged PDF (server-side render template blocks)
 - Filter batch export (status/date range/currency)

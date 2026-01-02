@@ -10,6 +10,4 @@ import "jspdf/dist/polyfills.es.js";
 import "jspdf/dist/jspdf.es.min.js";
 
 // The plugin augments jsPDF API.
-// eslint-disable-next-line import/no-unresolved
 import "jspdf/dist/jspdf.plugin.pdf.js";
-

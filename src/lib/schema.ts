@@ -100,6 +100,11 @@ export const templateBlockSchema = z.object({
   w: z.number().int().min(1),
   h: z.number().int().min(1),
   props: z.record(z.string(), z.unknown()).default({}),
+  // Builder metadata (optional-but-defaulted for backwards compatibility)
+  name: z.string().default(""),
+  order: z.number().int().min(0).default(0),
+  locked: z.boolean().default(false),
+  hidden: z.boolean().default(false),
 });
 
 export const invoiceTemplateSchema = z.object({
@@ -114,6 +119,9 @@ export const invoiceTemplateSchema = z.object({
     background: z.string().default("#ffffff"),
   }),
   blocks: z.array(templateBlockSchema).default([]),
+  // Optional sample data used by Template Builder preview.
+  // Kept optional for backward compatibility with existing localStorage data.
+  previewData: billingSchema.optional(),
 });
 
 export type TemplateBlockType = z.infer<typeof templateBlockTypeSchema>;
